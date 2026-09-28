@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix DataSchema Studio",
+  "description": "Визуальный конструктор и архитектурный моделлер баз данных с поддержкой SQL импорта/экспорта, API интеграции, GitHub версионирования, RBAC прав доступа и AI оптимизатором запросов.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
