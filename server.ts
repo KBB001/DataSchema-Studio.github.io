@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -35,32 +35,44 @@ function getGenAI(): GoogleGenAI | null {
   return aiClient;
 }
 
-// Call Gemini with automatic fallback between approved models and a 3.5s timeout
+// Call Gemini with automatic fallback between approved models and appropriate timeout
 async function callGeminiWithFallback(
   ai: GoogleGenAI,
   prompt: string,
-  config?: any
+  baseConfig?: any
 ): Promise<string> {
   const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
   let lastError: any = null;
 
   for (const model of candidateModels) {
+    let timer: NodeJS.Timeout | null = null;
     try {
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`AI generation timeout (3.5s) on ${model}`)), 3500)
-      );
+      const config = {
+        responseMimeType: 'application/json',
+        ...(model === 'gemini-3.8-flash' ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+        ...(baseConfig || {}),
+      };
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`AI generation timeout (25s) on ${model}`)), 25000);
+      });
+
       const response = await Promise.race([
         ai.models.generateContent({
           model,
           contents: prompt,
-          config: config || { responseMimeType: 'application/json' },
+          config,
         }),
         timeoutPromise,
       ]);
+
+      if (timer) clearTimeout(timer);
+
       if (response && response.text) {
         return response.text;
       }
     } catch (err: any) {
+      if (timer) clearTimeout(timer);
       lastError = err;
       const msg = String(err?.message || '');
       console.warn(`[Gemini Fallback] Model ${model} failed: ${msg}. Switching...`);
@@ -807,6 +819,8 @@ ${sqlQueries}
 app.post('/api/sql/execute', (req, res) => {
   const { query, schema } = req.body;
   const normalizedQuery = (query || '').trim();
+  const upper = normalizedQuery.toUpperCase();
+  const lower = normalizedQuery.toLowerCase();
 
   // Simulate SQL execution and return realistic datasets based on user query
   const startTime = performance.now();
@@ -815,15 +829,79 @@ app.post('/api/sql/execute', (req, res) => {
   let rows: any[] = [];
   let message = 'Запрос успешно выполнен';
 
-  if (normalizedQuery.toUpperCase().startsWith('SELECT')) {
-    if (normalizedQuery.toLowerCase().includes('user')) {
+  if (upper.startsWith('CALL') || upper.startsWith('EXEC')) {
+    columns = ['status', 'call_statement', 'execution_result', 'affected_entities'];
+    if (lower.includes('createrental')) {
+      columns = ['status', 'rental_id', 'car_id', 'client_id', 'total_days', 'total_cost', 'discount', 'car_status', 'vip_status'];
+      rows = [
+        {
+          status: 'SUCCESS',
+          rental_id: 1,
+          car_id: 1,
+          client_id: 1,
+          total_days: 3,
+          total_cost: '60000.00 ₸',
+          discount: '0%',
+          car_status: 'is_available = FALSE (Жалға берілді)',
+          vip_status: 'is_vip = TRUE (VIP 10% мәртебесі берілді)',
+        },
+      ];
+      message = 'Процедура CreateRental сәтті орындалды. Көлік мәртебесі жаңартылды және VIP мәртебесі берілді.';
+    } else {
+      rows = [{ status: 'SUCCESS', call_statement: normalizedQuery.split('(')[0], execution_result: 'OK', affected_entities: '1 row modified' }];
+      message = 'Хранимая процедура успешно выполнена';
+    }
+  } else if (upper.startsWith('SELECT')) {
+    if (lower.includes('from cars') || (lower.includes('cars') && (lower.includes('көлік') || lower.includes('license_plate')))) {
+      if (lower.includes('көлік') || lower.includes('мем_номер')) {
+        columns = ['car_id', 'Көлік', 'Мем_номер', 'Тәуліктік_баға', 'Мәртебесі'];
+        rows = [
+          { car_id: 1, 'Көлік': 'Toyota Camry 70', 'Мем_номер': '001AAA02', 'Тәуліктік_баға': '20 000.00 ₸', 'Мәртебесі': 'Жалға берілген' },
+          { car_id: 2, 'Көлік': 'Hyundai Elantra', 'Мем_номер': '002BBB02', 'Тәуліктік_баға': '15 000.00 ₸', 'Мәртебесі': 'Бос' },
+          { car_id: 3, 'Көлік': 'Mercedes-Benz E-Class', 'Мем_номер': '003CCC02', 'Тәуліктік_баға': '35 000.00 ₸', 'Мәртебесі': 'Бос' },
+        ];
+      } else {
+        columns = ['car_id', 'brand', 'model', 'license_plate', 'daily_rate', 'is_available'];
+        rows = [
+          { car_id: 1, brand: 'Toyota', model: 'Camry 70', license_plate: '001AAA02', daily_rate: 20000.0, is_available: false },
+          { car_id: 2, brand: 'Hyundai', model: 'Elantra', license_plate: '002BBB02', daily_rate: 15000.0, is_available: true },
+          { car_id: 3, brand: 'Mercedes-Benz', model: 'E-Class', license_plate: '003CCC02', daily_rate: 35000.0, is_available: true },
+        ];
+      }
+    } else if (lower.includes('from clients') || lower.includes('clients')) {
+      if (lower.includes('vip_мәртебе') || lower.includes('клиент')) {
+        columns = ['client_id', 'Клиент', 'VIP_Мәртебе'];
+        rows = [
+          { client_id: 1, 'Клиент': 'Аскаров Айдос', 'VIP_Мәртебе': 'Иә (VIP 10%)' },
+          { client_id: 2, 'Клиент': 'Серікова Мадина', 'VIP_Мәртебе': 'Жоқ' },
+        ];
+      } else {
+        columns = ['client_id', 'last_name', 'first_name', 'driver_license', 'phone', 'email', 'is_vip'];
+        rows = [
+          { client_id: 1, last_name: 'Аскаров', first_name: 'Айдос', driver_license: 'DL123456', phone: '87071112233', email: 'aidos@example.com', is_vip: true },
+          { client_id: 2, last_name: 'Серікова', first_name: 'Мадина', driver_license: 'DL654321', phone: '87074445566', email: 'madina@example.com', is_vip: false },
+        ];
+      }
+    } else if (lower.includes('from rentals') || lower.includes('rentals')) {
+      if (lower.includes('жалпы_сома') || lower.includes('клиент')) {
+        columns = ['rental_id', 'Клиент', 'Көлік', 'Басталды', 'Аяқталды', 'Күн_саны', 'Жеңілдік', 'Жалпы_сома'];
+        rows = [
+          { rental_id: 1, 'Клиент': 'Аскаров Айдос', 'Көлік': 'Toyota Camry 70', 'Басталды': '2026-10-01', 'Аяқталды': '2026-10-04', 'Күн_саны': 3, 'Жеңілдік': '0%', 'Жалпы_сома': '60 000.00 ₸' },
+        ];
+      } else {
+        columns = ['rental_id', 'car_id', 'client_id', 'start_date', 'end_date', 'total_days', 'total_cost', 'discount_applied'];
+        rows = [
+          { rental_id: 1, car_id: 1, client_id: 1, start_date: '2026-10-01', end_date: '2026-10-04', total_days: 3, total_cost: 60000.0, discount_applied: 0.0 },
+        ];
+      }
+    } else if (lower.includes('user')) {
       columns = ['id', 'username', 'email', 'role', 'status', 'created_at'];
       rows = [
         { id: 1, username: 'admin_alex', email: 'alex@company.org', role: 'admin', status: 'ACTIVE', created_at: '2026-01-15 09:20:00' },
         { id: 2, username: 'elena_dev', email: 'elena@company.org', role: 'architect', status: 'ACTIVE', created_at: '2026-02-01 14:10:00' },
         { id: 3, username: 'max_viewer', email: 'max@company.org', role: 'viewer', status: 'PENDING', created_at: '2026-03-10 18:45:00' },
       ];
-    } else if (normalizedQuery.toLowerCase().includes('order')) {
+    } else if (lower.includes('order')) {
       columns = ['id', 'user_id', 'order_number', 'total_amount', 'status', 'created_at'];
       rows = [
         { id: 101, user_id: 1, order_number: 'ORD-2026-901', total_amount: 499.50, status: 'COMPLETED', created_at: '2026-09-18 11:20:00' },
@@ -831,25 +909,41 @@ app.post('/api/sql/execute', (req, res) => {
         { id: 103, user_id: 1, order_number: 'ORD-2026-903', total_amount: 89.90, status: 'SHIPPED', created_at: '2026-09-21 08:15:00' },
       ];
     } else {
-      columns = ['table_name', 'total_rows', 'engine', 'collation'];
-      rows = (schema?.tables || []).map((t: any, idx: number) => ({
-        table_name: t.name,
-        total_rows: Math.floor(Math.random() * 5000) + 120,
-        engine: 'InnoDB / Postgres Heap',
-        collation: 'utf8mb4_unicode_ci'
-      }));
-      if (rows.length === 0) {
+      // Dynamic fallback matching any schema table
+      const matchedTable = (schema?.tables || []).find((t: any) =>
+        lower.includes(t.name.toLowerCase())
+      );
+      if (matchedTable) {
+        columns = matchedTable.columns.map((c: any) => c.name);
         rows = [
-          { table_name: 'demo_table', total_rows: 1420, engine: 'InnoDB', collation: 'utf8mb4_unicode_ci' }
+          columns.reduce((acc, col, idx) => {
+            acc[col] = idx === 0 ? 1 : `val_${col}_1`;
+            return acc;
+          }, {} as Record<string, any>),
+          columns.reduce((acc, col, idx) => {
+            acc[col] = idx === 0 ? 2 : `val_${col}_2`;
+            return acc;
+          }, {} as Record<string, any>),
         ];
+      } else {
+        columns = ['table_name', 'total_rows', 'engine', 'collation'];
+        rows = (schema?.tables || []).map((t: any) => ({
+          table_name: t.name,
+          total_rows: Math.floor(Math.random() * 5000) + 120,
+          engine: 'InnoDB / Postgres Heap',
+          collation: 'utf8mb4_unicode_ci',
+        }));
+        if (rows.length === 0) {
+          rows = [{ table_name: 'demo_table', total_rows: 1420, engine: 'InnoDB', collation: 'utf8mb4_unicode_ci' }];
+        }
       }
     }
     message = `Выборка строк: ${rows.length}`;
-  } else if (normalizedQuery.toUpperCase().startsWith('INSERT') || normalizedQuery.toUpperCase().startsWith('UPDATE')) {
+  } else if (upper.startsWith('INSERT') || upper.startsWith('UPDATE')) {
     columns = ['affected_rows', 'last_insert_id'];
     rows = [{ affected_rows: 1, last_insert_id: Math.floor(Math.random() * 9000) + 1000 }];
     message = '1 строка успешно изменена';
-  } else if (normalizedQuery.toUpperCase().startsWith('CREATE') || normalizedQuery.toUpperCase().startsWith('ALTER')) {
+  } else if (upper.startsWith('CREATE') || upper.startsWith('ALTER')) {
     columns = ['command', 'status'];
     rows = [{ command: normalizedQuery.split(' ')[0], status: 'DDL SUCCESS' }];
     message = 'Схема базы данных успешно обновлена в SQL каталоге';
@@ -871,8 +965,8 @@ app.post('/api/sql/execute', (req, res) => {
       operation: 'Index Scan using idx_primary',
       cost: '0.15..8.22',
       rows: rows.length,
-      width: 128
-    }
+      width: 128,
+    },
   });
 });
 

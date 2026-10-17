@@ -100,27 +100,42 @@ LIMIT 10;`
         </div>
 
         {/* Quick query presets */}
-        <div className="flex items-center gap-1.5 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-slate-400 font-medium hidden sm:inline">Пресеты:</span>
-          {schema.tables.slice(0, 3).map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setQuery(`SELECT * FROM ${t.name} LIMIT 25;`)}
-              className="px-2.5 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 rounded font-mono text-[11px]"
-            >
-              {t.name}
-            </button>
-          ))}
-          <button
-            onClick={() =>
-              setQuery(
-                `SELECT o.order_number, o.total_amount, u.email \nFROM orders o \nJOIN users u ON o.user_id = u.id \nLIMIT 10;`
-              )
-            }
-            className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded font-mono text-[11px]"
-          >
-            JOIN orders + users
-          </button>
+          {schema.queries && schema.queries.length > 0
+            ? schema.queries.map((q, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setQuery(q.sql)}
+                  className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded font-medium text-[11px] max-w-[200px] truncate"
+                  title={q.name + (q.description ? ` (${q.description})` : '')}
+                >
+                  {q.name}
+                </button>
+              ))
+            : (
+                <>
+                  {schema.tables.slice(0, 3).map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setQuery(`SELECT * FROM ${t.name} LIMIT 25;`)}
+                      className="px-2.5 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 rounded font-mono text-[11px]"
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() =>
+                      setQuery(
+                        `SELECT o.order_number, o.total_amount, u.email \nFROM orders o \nJOIN users u ON o.user_id = u.id \nLIMIT 10;`
+                      )
+                    }
+                    className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded font-mono text-[11px]"
+                  >
+                    JOIN orders + users
+                  </button>
+                </>
+              )}
         </div>
       </div>
 

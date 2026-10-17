@@ -62,20 +62,24 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
 
         {/* Dialect Selector */}
-        <div className="hidden sm:flex items-center gap-1 text-xs">
-          <span className="text-slate-500 font-medium">СУБД:</span>
-          <select
-            id="dialect-selector"
-            value={dialect || 'PostgreSQL'}
-            onChange={(e) => setDialect(e.target.value as SqlDialect)}
-            className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-slate-800 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer text-xs"
-          >
-            <option value="PostgreSQL">PostgreSQL</option>
-            <option value="MySQL">MySQL 8.0</option>
-            <option value="SQLite">SQLite 3</option>
-            <option value="MSSQL">MS SQL Server</option>
-            <option value="Oracle">Oracle DB</option>
-          </select>
+        <div className="hidden sm:flex items-center gap-1.5 text-xs">
+          <div className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200/70 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 transition-colors">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+            <span className="text-slate-500 text-[11px] font-medium">СУБД:</span>
+            <select
+              id="dialect-selector"
+              value={dialect || 'PostgreSQL'}
+              onChange={(e) => setDialect(e.target.value as SqlDialect)}
+              className="bg-transparent text-slate-800 font-semibold focus:outline-none cursor-pointer text-xs"
+              title="Текущий диалект схемы базы данных"
+            >
+              <option value="PostgreSQL">PostgreSQL</option>
+              <option value="MySQL">MySQL 8.0</option>
+              <option value="SQLite">SQLite 3</option>
+              <option value="MSSQL">MS SQL Server</option>
+              <option value="Oracle">Oracle DB</option>
+            </select>
+          </div>
         </div>
 
         <div className="hidden md:flex items-center gap-2 text-xs text-slate-500 bg-slate-50 px-2 py-1 rounded border border-slate-100">

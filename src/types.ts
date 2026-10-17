@@ -161,6 +161,23 @@ export interface Schema {
   relationships: Relationship[];
   shapes?: DiagramShape[];
   canvasSettings?: CanvasSettings;
+  routines?: {
+    name: string;
+    type: 'PROCEDURE' | 'FUNCTION';
+    definition: string;
+    description?: string;
+  }[];
+  triggers?: {
+    name: string;
+    targetTable: string;
+    timing: string;
+    definition: string;
+  }[];
+  queries?: {
+    name: string;
+    sql: string;
+    description?: string;
+  }[];
 }
 
 export type UserRole = 'Super Admin' | 'Database Architect' | 'Schema Editor' | 'Read-Only Analyst' | 'DevOps / Auditor';

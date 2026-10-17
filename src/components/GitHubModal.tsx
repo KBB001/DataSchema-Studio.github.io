@@ -28,8 +28,6 @@ export const GitHubModal: React.FC<GitHubModalProps> = ({
   onClose,
   onRecordChange,
 }) => {
-  if (!isOpen) return null;
-
   const [repo, setRepo] = useState('enterprise-org/core-database-architecture');
   const [branch, setBranch] = useState('main');
   const [commitMessage, setCommitMessage] = useState(
@@ -64,6 +62,8 @@ export const GitHubModal: React.FC<GitHubModalProps> = ({
   ]);
 
   const [activeTab, setActiveTab] = useState<'commit' | 'history' | 'settings'>('commit');
+
+  if (!isOpen) return null;
 
   const migrationSql = generateSql(schema, {
     dialect: schema.dialect,

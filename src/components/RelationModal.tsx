@@ -19,21 +19,21 @@ export const RelationModal: React.FC<RelationModalProps> = ({
   onSave,
   onDelete,
 }) => {
-  if (!isOpen || !relationship) return null;
-
-  const [type, setType] = useState<RelationType>(relationship.type || '1:N');
-  const [onDeleteRule, setOnDeleteRule] = useState<CascadeRule>(relationship.onDelete || 'CASCADE');
-  const [onUpdateRule, setOnUpdateRule] = useState<CascadeRule>(relationship.onUpdate || 'CASCADE');
-  const [name, setName] = useState(relationship.name || '');
+  const [type, setType] = useState<RelationType>(relationship?.type || '1:N');
+  const [onDeleteRule, setOnDeleteRule] = useState<CascadeRule>(relationship?.onDelete || 'CASCADE');
+  const [onUpdateRule, setOnUpdateRule] = useState<CascadeRule>(relationship?.onUpdate || 'CASCADE');
+  const [name, setName] = useState(relationship?.name || '');
 
   React.useEffect(() => {
-    if (relationship) {
+    if (relationship && isOpen) {
       setType(relationship.type || '1:N');
       setOnDeleteRule(relationship.onDelete || 'CASCADE');
       setOnUpdateRule(relationship.onUpdate || 'CASCADE');
       setName(relationship.name || '');
     }
-  }, [relationship]);
+  }, [relationship, isOpen]);
+
+  if (!isOpen || !relationship) return null;
 
   const srcTable = schema.tables.find((t) => t.id === relationship.sourceTableId);
   const tgtTable = schema.tables.find((t) => t.id === relationship.targetTableId);

@@ -1,4 +1,5 @@
 import { Column, ColumnType, Relationship, Schema, SqlDialect, Table } from '../types';
+import { inferSchemaFromQueriesLocally } from './sqlQueryParser';
 
 export interface SqlExportOptions {
   dialect: SqlDialect;
@@ -10,6 +11,10 @@ export interface SqlExportOptions {
   includeComments: boolean;
   includeSchemaPrefix?: string;
   selectedTableId?: string;
+  includeSeedData?: boolean;
+  seedRowCount?: number;
+  includeTriggers?: boolean;
+  includeRoutines?: boolean;
 }
 
 // Map column data types across dialects
@@ -192,11 +197,16 @@ function escapeSql(str: string): string {
   return str.replace(/'/g, "''");
 }
 
+function cleanIdent(name: string): string {
+  return name.replace(/^[`"\[\s]+|[`"\]\s]+$/g, '').trim();
+}
+
 function quoteIdent(name: string, dialect: SqlDialect): string {
-  if (dialect === 'MySQL') return `\`${name}\``;
-  if (dialect === 'MSSQL') return `[${name}]`;
-  if (dialect === 'PostgreSQL' || dialect === 'Oracle') return `"${name}"`;
-  return name;
+  const clean = cleanIdent(name);
+  if (dialect === 'MySQL') return `\`${clean}\``;
+  if (dialect === 'MSSQL') return `[${clean}]`;
+  if (dialect === 'PostgreSQL' || dialect === 'Oracle') return `"${clean}"`;
+  return `"${clean}"`;
 }
 
 // Generate DDL SQL
@@ -410,6 +420,50 @@ export function generateSql(schema: Schema, options: SqlExportOptions): string {
       }
       lines.push('');
     }
+  }
+
+  // 5. Triggers (if present in schema and enabled)
+  if ((options.includeTriggers ?? true) && schema.triggers && schema.triggers.length > 0) {
+    lines.push(`-- --------------------------------------------------------`);
+    lines.push(`-- Database Triggers (${schema.triggers.length})`);
+    lines.push(`-- --------------------------------------------------------`);
+    if (dialect === 'MySQL') {
+      lines.push('DELIMITER //\n');
+    }
+    for (const trg of schema.triggers) {
+      lines.push(`-- Trigger: ${trg.name} on ${trg.targetTable}`);
+      lines.push(trg.definition.endsWith(';') ? trg.definition : `${trg.definition};`);
+      lines.push('');
+    }
+    if (dialect === 'MySQL') {
+      lines.push('DELIMITER ;\n');
+    }
+  }
+
+  // 6. Stored Procedures and Functions (if present in schema and enabled)
+  if ((options.includeRoutines ?? true) && schema.routines && schema.routines.length > 0) {
+    lines.push(`-- --------------------------------------------------------`);
+    lines.push(`-- Stored Procedures & Functions (${schema.routines.length})`);
+    lines.push(`-- --------------------------------------------------------`);
+    if (dialect === 'MySQL') {
+      lines.push('DELIMITER //\n');
+    }
+    for (const rt of schema.routines) {
+      lines.push(`-- Routine: ${rt.name} (${rt.type})`);
+      lines.push(rt.definition.endsWith(';') ? rt.definition : `${rt.definition};`);
+      lines.push('');
+    }
+    if (dialect === 'MySQL') {
+      lines.push('DELIMITER ;\n');
+    }
+  }
+
+  // 7. Seed / Initial Mock Data (if enabled)
+  if (options.includeSeedData && targetTables.length > 0) {
+    lines.push(`-- --------------------------------------------------------`);
+    lines.push(`-- Initial Seed Data (${options.seedRowCount || 5} строк на таблицу)`);
+    lines.push(`-- --------------------------------------------------------\n`);
+    lines.push(generateSeedDataSql(schema, dialect, options.seedRowCount || 5));
   }
 
   return lines.join('\n');
@@ -669,20 +723,469 @@ export function generateMigrationScript(schema: Schema, dialect: SqlDialect): { 
   return { upSql, downSql, filename };
 }
 
-// Robust, multi-line aware AST parser for raw SQL DDL
-export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Relationship[] } {
-  const stripQuotes = (s: string): string => s.replace(/[`"\[\]\s]/g, '');
+export interface ParsedDdlResult {
+  tables: Table[];
+  relationships: Relationship[];
+  detectedDialect?: SqlDialect;
+  databaseName?: string;
+  triggers?: {
+    name: string;
+    targetTable: string;
+    timing: string;
+    definition: string;
+  }[];
+  routines?: {
+    name: string;
+    type: 'PROCEDURE' | 'FUNCTION';
+    definition: string;
+    description?: string;
+  }[];
+  queries?: {
+    name: string;
+    sql: string;
+    description?: string;
+  }[];
+  seedInsertsCount?: number;
+  inferredFromInserts?: boolean;
+}
+
+export interface DialectDetectionResult {
+  dialect: SqlDialect;
+  confidence: number; // 0 - 100
+  matchedTokens: string[];
+  explanation: string;
+}
+
+/**
+ * Detailed detection of SQL dialect with confidence estimation and token inspection
+ */
+export function detectSqlDialectDetailed(sql: string): DialectDetectionResult {
+  if (!sql || !sql.trim()) {
+    return {
+      dialect: 'PostgreSQL',
+      confidence: 50,
+      matchedTokens: [],
+      explanation: 'Стандартный ANSI SQL синтаксис (по умолчанию PostgreSQL)',
+    };
+  }
+
+  const upper = sql.toUpperCase();
+  const scores: Record<SqlDialect, { score: number; tokens: string[] }> = {
+    MySQL: { score: 0, tokens: [] },
+    PostgreSQL: { score: 0, tokens: [] },
+    SQLite: { score: 0, tokens: [] },
+    MSSQL: { score: 0, tokens: [] },
+    Oracle: { score: 0, tokens: [] },
+  };
+
+  // 1. MySQL patterns
+  if (upper.includes('AUTO_INCREMENT')) {
+    scores.MySQL.score += 45;
+    scores.MySQL.tokens.push('AUTO_INCREMENT');
+  }
+  if (upper.includes('ENGINE=') || upper.includes('ENGINE =')) {
+    scores.MySQL.score += 40;
+    scores.MySQL.tokens.push('ENGINE=InnoDB');
+  }
+  if (upper.includes('DELIMITER')) {
+    scores.MySQL.score += 35;
+    scores.MySQL.tokens.push('DELIMITER');
+  }
+  if (upper.includes('UTF8MB4') || upper.includes('COLLATE UTF8MB4')) {
+    scores.MySQL.score += 30;
+    scores.MySQL.tokens.push('utf8mb4');
+  }
+  if (/`[^`]+`/.test(sql)) {
+    scores.MySQL.score += 25;
+    scores.MySQL.tokens.push('Обратные кавычки (`...`)');
+  }
+  if (upper.includes('TINYINT(1)') || upper.includes('MEDIUMINT')) {
+    scores.MySQL.score += 25;
+    scores.MySQL.tokens.push('TINYINT/MEDIUMINT');
+  }
+  if (upper.includes('SIGNAL SQLSTATE')) {
+    scores.MySQL.score += 30;
+    scores.MySQL.tokens.push('SIGNAL SQLSTATE');
+  }
+
+  // 2. PostgreSQL patterns
+  if (upper.includes('BIGSERIAL') || upper.includes('SERIAL')) {
+    scores.PostgreSQL.score += 45;
+    scores.PostgreSQL.tokens.push('SERIAL/BIGSERIAL');
+  }
+  if (upper.includes('TIMESTAMPTZ')) {
+    scores.PostgreSQL.score += 40;
+    scores.PostgreSQL.tokens.push('TIMESTAMPTZ');
+  }
+  if (upper.includes('JSONB')) {
+    scores.PostgreSQL.score += 40;
+    scores.PostgreSQL.tokens.push('JSONB');
+  }
+  if (upper.includes('GEN_RANDOM_UUID()') || upper.includes('UUID DEFAULT')) {
+    scores.PostgreSQL.score += 35;
+    scores.PostgreSQL.tokens.push('UUID gen_random_uuid');
+  }
+  if (upper.includes('BYTEA')) {
+    scores.PostgreSQL.score += 35;
+    scores.PostgreSQL.tokens.push('BYTEA');
+  }
+  if (upper.includes('RETURNING')) {
+    scores.PostgreSQL.score += 30;
+    scores.PostgreSQL.tokens.push('RETURNING');
+  }
+  if (/\$\$[\s\S]*?\$\$/.test(sql)) {
+    scores.PostgreSQL.score += 30;
+    scores.PostgreSQL.tokens.push('Dollar-quotes ($$...$$)');
+  }
+
+  // 3. SQLite patterns
+  if (upper.includes('AUTOINCREMENT') && !upper.includes('AUTO_INCREMENT')) {
+    scores.SQLite.score += 50;
+    scores.SQLite.tokens.push('AUTOINCREMENT');
+  }
+  if (upper.includes('WITHOUT ROWID')) {
+    scores.SQLite.score += 45;
+    scores.SQLite.tokens.push('WITHOUT ROWID');
+  }
+  if (upper.includes('PRAGMA')) {
+    scores.SQLite.score += 40;
+    scores.SQLite.tokens.push('PRAGMA');
+  }
+  if (/INTEGER\s+PRIMARY\s+KEY/i.test(sql) && !upper.includes('AUTO_INCREMENT')) {
+    scores.SQLite.score += 25;
+    scores.SQLite.tokens.push('INTEGER PRIMARY KEY');
+  }
+
+  // 4. MSSQL patterns
+  if (upper.includes('IDENTITY(1,1)') || upper.includes('IDENTITY(')) {
+    scores.MSSQL.score += 50;
+    scores.MSSQL.tokens.push('IDENTITY');
+  }
+  if (upper.includes('DATETIME2')) {
+    scores.MSSQL.score += 40;
+    scores.MSSQL.tokens.push('DATETIME2');
+  }
+  if (upper.includes('NVARCHAR(')) {
+    scores.MSSQL.score += 35;
+    scores.MSSQL.tokens.push('NVARCHAR');
+  }
+  if (upper.includes('GETDATE()')) {
+    scores.MSSQL.score += 30;
+    scores.MSSQL.tokens.push('GETDATE()');
+  }
+  if (/\[(?:dbo|sys|user|[\w\s]+)\]/i.test(sql)) {
+    scores.MSSQL.score += 30;
+    scores.MSSQL.tokens.push('Квадратные скобки ([dbo])');
+  }
+  if (upper.includes('CLUSTERED INDEX') || upper.includes('NONCLUSTERED')) {
+    scores.MSSQL.score += 35;
+    scores.MSSQL.tokens.push('CLUSTERED');
+  }
+
+  // 5. Oracle patterns
+  if (upper.includes('VARCHAR2')) {
+    scores.Oracle.score += 50;
+    scores.Oracle.tokens.push('VARCHAR2');
+  }
+  if (upper.includes('NUMBER(')) {
+    scores.Oracle.score += 30;
+    scores.Oracle.tokens.push('NUMBER(p,s)');
+  }
+  if (upper.includes('SYSDATE')) {
+    scores.Oracle.score += 35;
+    scores.Oracle.tokens.push('SYSDATE');
+  }
+  if (upper.includes('CLOB') || upper.includes('BLOB')) {
+    scores.Oracle.score += 25;
+    scores.Oracle.tokens.push('CLOB/BLOB');
+  }
+  if (upper.includes('FROM DUAL')) {
+    scores.Oracle.score += 35;
+    scores.Oracle.tokens.push('DUAL');
+  }
+
+  // Find the highest scoring dialect
+  const dialects: SqlDialect[] = ['MySQL', 'PostgreSQL', 'SQLite', 'MSSQL', 'Oracle'];
+  let bestDialect: SqlDialect = 'PostgreSQL';
+  let bestScore = 0;
+
+  for (const d of dialects) {
+    if (scores[d].score > bestScore) {
+      bestScore = scores[d].score;
+      bestDialect = d;
+    }
+  }
+
+  if (bestScore === 0) {
+    return {
+      dialect: 'PostgreSQL',
+      confidence: 65,
+      matchedTokens: ['ANSI SQL DDL'],
+      explanation: 'Специфичные маркеры диалекта не найдены, применен стандартный синтаксис (PostgreSQL)',
+    };
+  }
+
+  const confidence = Math.min(99, Math.max(70, Math.round(50 + bestScore / 1.5)));
+  const matchedTokens = scores[bestDialect].tokens;
+  const explanation = `Обнаружены маркеры диалекта ${bestDialect}: ${matchedTokens.join(', ')}`;
+
+  return {
+    dialect: bestDialect,
+    confidence,
+    matchedTokens,
+    explanation,
+  };
+}
+
+/**
+ * Detects SQL dialect from keywords, data types, and syntax nuances
+ */
+export function detectSqlDialect(sql: string): SqlDialect {
+  return detectSqlDialectDetailed(sql).dialect;
+}
+
+/**
+ * Parses table name specification which can be:
+ * - [dbo].[Order Details]
+ * - "public"."Users"
+ * - `mydb`.`Покупатели`
+ * - `Детали продажи`
+ * - Users
+ */
+export function parseTableSpec(spec: string): { schemaName?: string; tableName: string } {
+  const parts: string[] = [];
+  const partRegex = /`([^`]+)`|"([^"]+)"|\[([^\]]+)\]|([^\s\.]+)/g;
+  let pMatch: RegExpExecArray | null;
+  while ((pMatch = partRegex.exec(spec)) !== null) {
+    const val = pMatch[1] || pMatch[2] || pMatch[3] || pMatch[4];
+    if (val && val.trim()) {
+      parts.push(val.trim());
+    }
+  }
+  if (parts.length >= 2) {
+    return {
+      schemaName: parts[parts.length - 2],
+      tableName: parts[parts.length - 1],
+    };
+  }
+  return {
+    tableName: parts[0] || cleanIdent(spec),
+  };
+}
+
+/**
+ * Safely strips SQL comments (-- and /* ... * / and #) while protecting
+ * string literals ('...', "...", `...`, and dollar quotes $$...$$).
+ */
+export function stripSqlCommentsSafely(sql: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let inDollarQuote = false;
+  let dollarTag = '';
+  let result = '';
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    const prev = sql[i - 1];
+    const prev2 = sql[i - 2];
+    const isEscaped = prev === '\\' && prev2 !== '\\';
+
+    // Check dollar quote in PostgreSQL $$ or $tag$
+    if (!inSingleQuote && !inDoubleQuote && !inBacktick && ch === '$') {
+      const rest = sql.slice(i);
+      const tagMatch = rest.match(/^\$([a-zA-Z0-9_]*)\$/);
+      if (tagMatch) {
+        if (!inDollarQuote) {
+          inDollarQuote = true;
+          dollarTag = tagMatch[0];
+          result += dollarTag;
+          i += dollarTag.length - 1;
+          continue;
+        } else if (rest.startsWith(dollarTag)) {
+          inDollarQuote = false;
+          result += dollarTag;
+          i += dollarTag.length - 1;
+          dollarTag = '';
+          continue;
+        }
+      }
+    }
+
+    if (inDollarQuote) {
+      result += ch;
+      continue;
+    }
+
+    if (!inDoubleQuote && !inBacktick && ch === "'" && !isEscaped) {
+      inSingleQuote = !inSingleQuote;
+      result += ch;
+      continue;
+    }
+    if (!inSingleQuote && !inBacktick && ch === '"' && !isEscaped) {
+      inDoubleQuote = !inDoubleQuote;
+      result += ch;
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && ch === '`' && !isEscaped) {
+      inBacktick = !inBacktick;
+      result += ch;
+      continue;
+    }
+
+    if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
+      // Single-line comment -- or #
+      if ((ch === '-' && next === '-') || ch === '#') {
+        let eol = sql.indexOf('\n', i);
+        if (eol === -1) eol = sql.length;
+        i = eol - 1;
+        result += '\n';
+        continue;
+      }
+      // Multi-line comment /* ... */
+      if (ch === '/' && next === '*') {
+        const endC = sql.indexOf('*/', i + 2);
+        if (endC === -1) {
+          i = sql.length;
+        } else {
+          i = endC + 1;
+        }
+        result += ' ';
+        continue;
+      }
+    }
+
+    result += ch;
+  }
+  return result;
+}
+
+// Robust, multi-line and Unicode-aware AST parser for raw SQL DDL
+export function parseSqlDdl(sql: string): ParsedDdlResult {
   const tables: Table[] = [];
   const relationships: Relationship[] = [];
 
-  // Remove single line and multiline comments
-  const cleanSql = sql
-    .replace(/--.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .trim();
+  const detectedDialect = detectSqlDialect(sql);
 
-  // Find CREATE TABLE statements
-  const createTableRegex = /CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:[`"\[]?([a-zA-Z0-9_]+)[`"\]]?\.)?[`"\[]?([a-zA-Z0-9_]+)[`"\]]?\s*\(([\s\S]*?)\)(?:\s*ENGINE\s*=\s*[a-zA-Z0-9_]+)?(?:\s*DEFAULT\s+CHARSET\s*=\s*[a-zA-Z0-9_]+)?(?:\s*COMMENT\s*=\s*'[^']*')?\s*;/gi;
+  // Clean initial encodings, BOM and non-breaking spaces
+  let normalizedSql = sql
+    .replace(/^\uFEFF/, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  // Detect database name from CREATE DATABASE or USE statements
+  let databaseName: string | undefined;
+  const dbMatch =
+    normalizedSql.match(/CREATE\s+DATABASE(?:\s+IF\s+NOT\s+EXISTS)?\s+([^\s;]+)/i) ||
+    normalizedSql.match(/USE\s+([^\s;]+)/i);
+  if (dbMatch) {
+    databaseName = cleanIdent(dbMatch[1]);
+  }
+
+  // Extract Triggers (supports Cyrillic and Kazakh table and trigger names)
+  const triggers: { name: string; targetTable: string; timing: string; definition: string }[] = [];
+  const triggerRegex =
+    /CREATE\s+TRIGGER\s+([^\s]+)\s+((?:BEFORE|AFTER)\s+(?:INSERT|UPDATE|DELETE)\s+ON\s+([^\s]+)[\s\S]*?)(?:END(?:\/{2}|;|\$|\s)|\/\/\s*|DELIMITER)/gi;
+  let trgMatch: RegExpExecArray | null;
+  while ((trgMatch = triggerRegex.exec(normalizedSql)) !== null) {
+    triggers.push({
+      name: cleanIdent(trgMatch[1]),
+      targetTable: cleanIdent(trgMatch[3]),
+      timing: trgMatch[2].split(/FOR\s+EACH/i)[0].trim(),
+      definition: trgMatch[0].trim(),
+    });
+  }
+
+  // Extract Stored Procedures and Functions
+  const routines: { name: string; type: 'PROCEDURE' | 'FUNCTION'; definition: string; description?: string }[] = [];
+  const procRegex =
+    /CREATE\s+(PROCEDURE|FUNCTION)\s+([^\s\(]+)\s*\(([\s\S]*?)\)[\s\S]*?(?:END(?:\/{2}|;|\$|\s)|\/\/\s*|DELIMITER)/gi;
+  let procMatch: RegExpExecArray | null;
+  while ((procMatch = procRegex.exec(normalizedSql)) !== null) {
+    routines.push({
+      name: cleanIdent(procMatch[2]),
+      type: procMatch[1].toUpperCase() as 'PROCEDURE' | 'FUNCTION',
+      definition: procMatch[0].trim(),
+      description: `Параметры: (${procMatch[3].replace(/\s+/g, ' ').trim()})`,
+    });
+  }
+
+  // Extract Views and Analytical queries
+  const queries: { name: string; sql: string; description?: string }[] = [];
+
+  // 1. Explicit CREATE VIEW statements
+  const viewRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([^\s]+)\s+AS\s+([\s\S]*?);/gi;
+  let vMatch: RegExpExecArray | null;
+  while ((vMatch = viewRegex.exec(normalizedSql)) !== null) {
+    const viewName = cleanIdent(vMatch[1]);
+    const viewSql = vMatch[2].trim();
+    queries.push({
+      name: `Представление: ${viewName}`,
+      sql: viewSql,
+      description: `CREATE VIEW \`${viewName}\``,
+    });
+  }
+
+  // 2. Explicit SELECT statements
+  const selectRegex = /(--[^\n]*\n)?(SELECT\s+[\s\S]*?;)/gi;
+  let qMatch: RegExpExecArray | null;
+  let qIndex = 1;
+  while ((qMatch = selectRegex.exec(normalizedSql)) !== null) {
+    const rawComment = (qMatch[1] || '').replace(/^--\s*/, '').trim();
+    const querySql = qMatch[2].trim();
+    if (!queries.some((q) => q.sql.includes(querySql))) {
+      queries.push({
+        name: rawComment || `Аналитический запрос ${qIndex++}`,
+        sql: querySql,
+        description: rawComment || undefined,
+      });
+    }
+  }
+
+  // Count Seed INSERT statements
+  const insertMatches = normalizedSql.match(/INSERT\s+INTO\s+/gi);
+  const seedInsertsCount = insertMatches ? insertMatches.length : 0;
+
+  // Extract comments above CREATE TABLE to use as table descriptions
+  const tablePreComments: Record<string, string> = {};
+  const preCommentRegex =
+    /((?:(?:--|#)[^\n]*\n)+)\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+|CACHED\s+|MEMORY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([^\(\);]+?)(?:\s*\(|\s+AS\b)/gi;
+  let pcMatch: RegExpExecArray | null;
+  while ((pcMatch = preCommentRegex.exec(normalizedSql)) !== null) {
+    const commentsBlock = pcMatch[1]
+      .split('\n')
+      .map((line) => line.replace(/^(?:--|#)\s*/, '').trim())
+      .filter(
+        (line) =>
+          line &&
+          !line.toUpperCase().startsWith('STREAMING_CHUNK') &&
+          !line.startsWith('1.') &&
+          !line.startsWith('2.') &&
+          !line.startsWith('3.') &&
+          !line.startsWith('4.')
+      )
+      .join('; ');
+    const tbl = parseTableSpec(pcMatch[2]).tableName.toLowerCase();
+    if (tbl && commentsBlock) {
+      tablePreComments[tbl] = commentsBlock;
+    }
+  }
+
+  // Normalize and clean SQL for DDL parsing:
+  // 1. Remove MySQL DELIMITER commands and replace custom delimiters (//, $$, etc.)
+  let cleanSql = normalizedSql
+    .replace(/^[ \t]*DELIMITER\s+[^\n]+/gim, '\n')
+    .replace(/(\bEND|\)|[A-Za-z0-9_\]"`'])\s*(\/{2}|\${2})/gi, '$1;')
+    .replace(/\s*(\/{2}|\${2})\s*$/gm, ';');
+
+  // 2. Strip comments safely with string literal and dollar quote awareness
+  cleanSql = stripSqlCommentsSafely(cleanSql).trim();
+
+  // Universal CREATE TABLE regex supporting all quoting styles, namespaces, and table variants
+  const createTableStartRegex =
+    /CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+|CACHED\s+|MEMORY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([^\(\);]+?)(?:\s*\(|\s+AS\b)/gi;
 
   let match: RegExpExecArray | null;
   const colors = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4', '#6366f1', '#14b8a6'];
@@ -690,24 +1193,85 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
   let currentX = 80;
   let currentY = 80;
 
-  while ((match = createTableRegex.exec(cleanSql)) !== null) {
-    const tableName = match[2];
-    const tableBody = match[3];
-    const tableId = `tbl_${tableName.toLowerCase()}`;
+  while ((match = createTableStartRegex.exec(cleanSql)) !== null) {
+    const fullMatch = match[0];
+    const tableSpec = parseTableSpec(match[1]);
+    const rawTableName = tableSpec.tableName;
+    const safeTableKey = rawTableName.toLowerCase().replace(/\s+/g, '_');
+    const tableId = `tbl_${safeTableKey}`;
+    const startIndex = match.index + fullMatch.length;
+
+    // Scan for closing parenthesis of the table definition respecting nested parens and strings
+    let depth = 1;
+    let endIndex = -1;
+    let inString = false;
+    let stringChar = '';
+
+    for (let i = startIndex; i < cleanSql.length; i++) {
+      const ch = cleanSql[i];
+      const isEscaped = cleanSql[i - 1] === '\\' && cleanSql[i - 2] !== '\\';
+      if ((ch === "'" || ch === '"' || ch === '`') && !isEscaped) {
+        if (!inString) {
+          inString = true;
+          stringChar = ch;
+        } else if (stringChar === ch) {
+          inString = false;
+        }
+        continue;
+      }
+      if (inString) continue;
+
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (endIndex === -1) {
+      // Fallback: look for closing paren before next CREATE TABLE or EOF
+      const nextCreate = cleanSql.slice(startIndex).search(/CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+)?TABLE/i);
+      const searchWindow = nextCreate > 0 ? cleanSql.substring(startIndex, startIndex + nextCreate) : cleanSql.substring(startIndex);
+      const lastParen = searchWindow.lastIndexOf(')');
+      if (lastParen !== -1) {
+        endIndex = startIndex + lastParen;
+      } else {
+        continue;
+      }
+    }
+
+    const tableBody = cleanSql.substring(startIndex, endIndex);
+    createTableStartRegex.lastIndex = endIndex + 1;
 
     const columns: Column[] = [];
 
-    // Split body into comma-separated items, respecting nested parentheses like DECIMAL(12, 2)
+    // Split body into comma-separated items at top depth (parenDepth === 0)
     const rawTokens: string[] = [];
     let currentToken = '';
     let parenDepth = 0;
+    let inStr = false;
+    let strCh = '';
 
     for (let i = 0; i < tableBody.length; i++) {
       const char = tableBody[i];
-      if (char === '(') parenDepth++;
-      if (char === ')') parenDepth--;
+      if ((char === "'" || char === '"') && tableBody[i - 1] !== '\\') {
+        if (!inStr) {
+          inStr = true;
+          strCh = char;
+        } else if (strCh === char) {
+          inStr = false;
+        }
+      }
 
-      if (char === ',' && parenDepth === 0) {
+      if (!inStr) {
+        if (char === '(') parenDepth++;
+        if (char === ')') parenDepth--;
+      }
+
+      if (char === ',' && parenDepth === 0 && !inStr) {
         if (currentToken.trim()) rawTokens.push(currentToken.trim());
         currentToken = '';
       } else {
@@ -716,63 +1280,119 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
     }
     if (currentToken.trim()) rawTokens.push(currentToken.trim());
 
-    // Process each token
+    // Process each token (column or constraint)
     for (const rawItem of rawTokens) {
       const item = rawItem.trim();
       if (!item) continue;
 
-      // Table-level PRIMARY KEY constraint
-      if (/^(CONSTRAINT\s+[a-zA-Z0-9_]+\s+)?PRIMARY\s+KEY/i.test(item)) {
+      // Table-level PRIMARY KEY constraint: [CONSTRAINT name] PRIMARY KEY (col1, col2)
+      if (/^(?:CONSTRAINT\s+[^\s]+\s+)?PRIMARY\s+KEY/i.test(item)) {
         const pkMatch = item.match(/PRIMARY\s+KEY\s*\(([^)]+)\)/i);
         if (pkMatch) {
-          const pkCols = pkMatch[1].split(',').map((c) => c.replace(/[`"\[\]\s]/g, ''));
+          const pkCols = pkMatch[1].split(',').map((c) => cleanIdent(c).toLowerCase());
           for (const pkCol of pkCols) {
-            const found = columns.find((c) => c.name.toLowerCase() === pkCol.toLowerCase());
+            const found = columns.find((c) => c.name.toLowerCase() === pkCol);
             if (found) found.isPk = true;
           }
         }
         continue;
       }
 
-      // Table-level FOREIGN KEY constraint
-      if (/^(CONSTRAINT\s+[a-zA-Z0-9_]+\s+)?FOREIGN\s+KEY/i.test(item)) {
-        const fkMatch = item.match(/FOREIGN\s+KEY\s*\([`"\[]?([a-zA-Z0-9_]+)[`"\]]?\)\s*REFERENCES\s+[`"\[]?([a-zA-Z0-9_]+)[`"\]]?\s*\([`"\[]?([a-zA-Z0-9_]+)[`"\]]?\)(?:\s+ON\s+DELETE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION))?(?:\s+ON\s+UPDATE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION))?/i);
+      // Table-level FOREIGN KEY constraint:
+      // [CONSTRAINT `name`] FOREIGN KEY (`col`) REFERENCES `target_table` (`target_col`) [ON DELETE ...] [ON UPDATE ...]
+      if (/(?:CONSTRAINT\s+([^\s]+)\s+)?FOREIGN\s+KEY/i.test(item) || /FOREIGN\s+KEY\s*\(/i.test(item)) {
+        const fkMatch = item.match(
+          /(?:CONSTRAINT\s+([^\s]+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+((?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+)(?:\s*\.\s*(?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+))*)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?(?:\s+ON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?/i
+        );
         if (fkMatch) {
-          const colName = fkMatch[1].toLowerCase();
-          const targetTable = fkMatch[2].toLowerCase();
-          const targetCol = fkMatch[3].toLowerCase();
-          const onDel = (fkMatch[4]?.toUpperCase() || 'CASCADE') as any;
-          const onUpd = (fkMatch[5]?.toUpperCase() || 'CASCADE') as any;
+          const colName = cleanIdent(fkMatch[2].split(',')[0]);
+          const targetSpec = parseTableSpec(fkMatch[3]);
+          const targetTable = targetSpec.tableName;
+          const targetCol = cleanIdent(fkMatch[4].split(',')[0]);
+          const constraintName = cleanIdent(fkMatch[1] || `fk_${safeTableKey}_${colName.toLowerCase().replace(/\s+/g, '_')}`);
+          const onDel = (fkMatch[5]?.toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+          const onUpd = (fkMatch[6]?.toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+
+          const tgtTableKey = targetTable.toLowerCase().replace(/\s+/g, '_');
+          const tgtColKey = targetCol.toLowerCase().replace(/\s+/g, '_');
 
           relationships.push({
-            id: `rel_${tableName}_${targetTable}_${Math.random().toString(36).substring(2, 7)}`,
+            id: `rel_${safeTableKey}_${tgtTableKey}_${Math.random().toString(36).substring(2, 7)}`,
             sourceTableId: tableId,
-            sourceColumnId: `c_${tableName}_${colName}`,
-            targetTableId: `tbl_${targetTable}`,
-            targetColumnId: `c_${targetTable}_${targetCol}`,
+            sourceColumnId: `c_${safeTableKey}_${colName.toLowerCase().replace(/\s+/g, '_')}`,
+            targetTableId: `tbl_${tgtTableKey}`,
+            targetColumnId: `c_${tgtTableKey}_${tgtColKey}`,
             type: '1:N',
             onDelete: onDel,
             onUpdate: onUpd,
-            name: `fk_${tableName}_${colName}`
+            name: constraintName,
           });
 
-          const foundCol = columns.find((c) => c.name.toLowerCase() === colName);
+          const foundCol = columns.find((c) => c.name.toLowerCase() === colName.toLowerCase());
           if (foundCol) foundCol.isFk = true;
         }
         continue;
       }
 
-      // Column Definition
-      const colMatch = item.match(/^[`"\[]?([a-zA-Z0-9_]+)[`"\]]?\s+([A-Za-z0-9_]+(?:\s*\([^)]+\))?)([\s\S]*)$/);
-      if (colMatch) {
-        const colName = colMatch[1];
-        const rawType = colMatch[2].toUpperCase();
-        const modifiers = (colMatch[3] || '').toUpperCase();
+      // Table-level UNIQUE constraint
+      if (/^(?:CONSTRAINT\s+[^\s]+\s+)?UNIQUE(?:\s+KEY|\s+INDEX)?\s*\(/i.test(item)) {
+        const uMatch = item.match(/UNIQUE(?:\s+KEY|\s+INDEX)?\s*\(([^)]+)\)/i);
+        if (uMatch) {
+          const uCols = uMatch[1].split(',').map((c) => cleanIdent(c).toLowerCase());
+          for (const uCol of uCols) {
+            const found = columns.find((c) => c.name.toLowerCase() === uCol);
+            if (found) found.isUnique = true;
+          }
+        }
+        continue;
+      }
 
-        const isPk = modifiers.includes('PRIMARY KEY') || rawType.includes('SERIAL') || (colName.toLowerCase() === 'id' && columns.length === 0);
-        const isNullable = !modifiers.includes('NOT NULL') && !isPk;
-        const isUnique = modifiers.includes('UNIQUE') || isPk;
-        const isFk = modifiers.includes('REFERENCES') || (colName.includes('_id') && !isPk);
+      // Ignore table-level CHECK, KEY, INDEX, FULLTEXT, SPATIAL (so they don't produce phantom columns)
+      if (/^(?:CONSTRAINT\s+[^\s]+\s+)?(?:CHECK|KEY|INDEX|FULLTEXT|SPATIAL)\b/i.test(item)) {
+        continue;
+      }
+
+      // Column Definition
+      let colName = '';
+      let modifiers = '';
+
+      const qMatch = item.match(/^(`([^`]+)`|"([^"]+)"|\[([^\]]+)\])\s+([\s\S]*)$/);
+      if (qMatch) {
+        colName = (qMatch[2] || qMatch[3] || qMatch[4]).trim();
+        modifiers = (qMatch[5] || '').trim();
+      } else {
+        const uMatch = item.match(/^([^\s]+)\s+([\s\S]*)$/);
+        if (uMatch) {
+          colName = cleanIdent(uMatch[1]);
+          modifiers = (uMatch[2] || '').trim();
+        }
+      }
+
+      if (colName) {
+        // Strip inline CHECK (...) so it doesn't corrupt DEFAULT value
+        modifiers = modifiers.replace(/CHECK\s*\([\s\S]*?\)/gi, '').trim();
+
+        // Extract raw type
+        const typeMatch = modifiers.match(
+          /^([A-Za-z0-9_]+(?:\s*\([^)]+\))?(?:\s+(?:VARYING|PRECISION|ZONE|TIME\s+ZONE|WITHOUT\s+TIME\s+ZONE|WITH\s+TIME\s+ZONE|UNSIGNED))?)([\s\S]*)$/i
+        );
+        let rawType = 'VARCHAR';
+        let restModifiers = modifiers;
+        if (typeMatch) {
+          rawType = typeMatch[1].trim().toUpperCase();
+          restModifiers = (typeMatch[2] || '').trim();
+        }
+
+        const isPk =
+          /PRIMARY\s+KEY/i.test(restModifiers) ||
+          /PRIMARY\s+KEY/i.test(rawType) ||
+          rawType.includes('SERIAL') ||
+          /AUTO_INCREMENT/i.test(restModifiers) ||
+          /IDENTITY/i.test(restModifiers) ||
+          (colName.toLowerCase() === 'id' && columns.length === 0);
+        const isNullable = !/NOT\s+NULL/i.test(restModifiers) && !isPk;
+        const isUnique = /UNIQUE/i.test(restModifiers) || isPk;
+        const isFk = /REFERENCES/i.test(restModifiers) || (colName.toLowerCase().endsWith('_id') && !isPk);
 
         let type: ColumnType = 'VARCHAR';
         let lengthOrPrecision: string | undefined;
@@ -782,8 +1402,8 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
           lengthOrPrecision = parenMatch[1];
         }
 
-        if (rawType.includes('BIGSERIAL') || (rawType.includes('BIGINT') && modifiers.includes('IDENTITY'))) type = 'BIGSERIAL';
-        else if (rawType.includes('SERIAL') || modifiers.includes('AUTO_INCREMENT')) type = 'SERIAL';
+        if (rawType.includes('BIGSERIAL') || (rawType.includes('BIGINT') && /IDENTITY/i.test(restModifiers))) type = 'BIGSERIAL';
+        else if (rawType.includes('SERIAL') || /AUTO_INCREMENT/i.test(restModifiers)) type = 'SERIAL';
         else if (rawType.includes('BIGINT')) type = 'BIGINT';
         else if (rawType.includes('INT')) type = 'INT';
         else if (rawType.includes('UUID') || rawType.includes('UNIQUEIDENTIFIER')) type = 'UUID';
@@ -797,15 +1417,23 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
         else if (rawType.includes('TEXT') || rawType.includes('CLOB')) type = 'TEXT';
         else type = 'VARCHAR';
 
-        // Extract default value if present
+        // Extract DEFAULT value if present
         let defaultValue: string | undefined;
-        const defaultMatch = modifiers.match(/DEFAULT\s+([^,]+)/i);
+        const defaultMatch = restModifiers.match(/DEFAULT\s+('([^']*)'|"([^"]*)"|\([^)]+\)|[^\s,;]+)/i);
         if (defaultMatch) {
           defaultValue = defaultMatch[1].trim();
         }
 
+        // Extract COMMENT if present
+        let colComment: string | undefined;
+        const commentMatch = restModifiers.match(/COMMENT\s+'([^']+)'/i);
+        if (commentMatch) {
+          colComment = commentMatch[1];
+        }
+
+        const safeColKey = colName.toLowerCase().replace(/\s+/g, '_');
         columns.push({
-          id: `c_${tableName}_${colName}`,
+          id: `c_${safeTableKey}_${safeColKey}`,
           name: colName,
           type,
           lengthOrPrecision,
@@ -814,25 +1442,34 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
           isNullable,
           isUnique,
           defaultValue,
+          comment: colComment,
         });
 
         // Inline REFERENCES parsing
-        if (modifiers.includes('REFERENCES')) {
-          const inlineRef = item.match(/REFERENCES\s+[`"\[]?([a-zA-Z0-9_]+)[`"\]]?\s*\(([`"\[]?([a-zA-Z0-9_]+)[`"\]]?)\)/i);
+        if (/REFERENCES/i.test(restModifiers)) {
+          const inlineRef = restModifiers.match(
+            /REFERENCES\s+((?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+)(?:\s*\.\s*(?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+))*)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?(?:\s+ON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?/i
+          );
           if (inlineRef) {
-            const tgtTable = inlineRef[1].toLowerCase();
-            const tgtCol = inlineRef[2].replace(/[`"\[\]]/g, '').toLowerCase();
+            const targetSpec = parseTableSpec(inlineRef[1]);
+            const tgtTable = targetSpec.tableName;
+            const tgtCol = cleanIdent(inlineRef[2].split(',')[0]);
+            const onDel = (inlineRef[3]?.toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+            const onUpd = (inlineRef[4]?.toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+
+            const tgtTableKey = tgtTable.toLowerCase().replace(/\s+/g, '_');
+            const tgtColKey = tgtCol.toLowerCase().replace(/\s+/g, '_');
 
             relationships.push({
-              id: `rel_${tableName}_${tgtTable}_${Math.random().toString(36).substring(2, 7)}`,
+              id: `rel_${safeTableKey}_${tgtTableKey}_${Math.random().toString(36).substring(2, 7)}`,
               sourceTableId: tableId,
-              sourceColumnId: `c_${tableName}_${colName}`,
-              targetTableId: `tbl_${tgtTable}`,
-              targetColumnId: `c_${tgtTable}_${tgtCol}`,
+              sourceColumnId: `c_${safeTableKey}_${safeColKey}`,
+              targetTableId: `tbl_${tgtTableKey}`,
+              targetColumnId: `c_${tgtTableKey}_${tgtColKey}`,
               type: '1:N',
-              onDelete: 'CASCADE',
-              onUpdate: 'CASCADE',
-              name: `fk_${tableName}_${colName}`
+              onDelete: onDel,
+              onUpdate: onUpd,
+              name: `fk_${safeTableKey}_${safeColKey}`,
             });
           }
         }
@@ -841,16 +1478,22 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
 
     // Ensure table has at least one PK if none found
     if (!columns.some((c) => c.isPk) && columns.length > 0) {
-      const idCol = columns.find((c) => c.name.toLowerCase() === 'id');
+      const idCol = columns.find(
+        (c) =>
+          c.name.toLowerCase() === 'id' ||
+          c.name.toLowerCase().endsWith('_id') ||
+          c.name.toLowerCase().startsWith('id_')
+      );
       if (idCol) {
         idCol.isPk = true;
       }
     }
 
+    const preComment = tablePreComments[rawTableName.toLowerCase()];
     tables.push({
       id: tableId,
-      name: tableName,
-      comment: `Таблица ${tableName} (импортирована из DDL)`,
+      name: rawTableName,
+      comment: preComment || `Таблица ${rawTableName} (импортирована из DDL)`,
       x: currentX,
       y: currentY,
       color: colors[colorIdx % colors.length],
@@ -865,36 +1508,167 @@ export function parseSqlDdl(sql: string): { tables: Table[]; relationships: Rela
     }
   }
 
-  // Parse standalone ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY statements
-  const alterFkRegex = /ALTER\s+TABLE\s+([^\s(]+)\s+ADD\s+CONSTRAINT\s+([^\s(]+)?\s*FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+([^\s(]+)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+([a-zA-Z\s]+))?(?:\s+ON\s+UPDATE\s+([a-zA-Z\s]+))?/gi;
+  // Parse standalone ALTER TABLE ... ADD [CONSTRAINT] ... FOREIGN KEY statements
+  const alterFkRegex =
+    /ALTER\s+TABLE\s+((?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+)(?:\s*\.\s*(?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+))*)\s+ADD\s+(?:CONSTRAINT\s+([^\s]+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+((?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+)(?:\s*\.\s*(?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+))*)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?(?:\s+ON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?/gi;
 
   let alterMatch: RegExpExecArray | null;
   while ((alterMatch = alterFkRegex.exec(cleanSql)) !== null) {
-    const srcTbl = stripQuotes(alterMatch[1]).toLowerCase();
-    const constraintName = alterMatch[2] ? stripQuotes(alterMatch[2]) : `fk_${srcTbl}`;
-    const srcCol = stripQuotes(alterMatch[3]).toLowerCase();
-    const tgtTbl = stripQuotes(alterMatch[4]).toLowerCase();
-    const tgtCol = stripQuotes(alterMatch[5]).toLowerCase();
-    const onDel = (alterMatch[6]?.trim().toUpperCase() || 'CASCADE') as any;
-    const onUpd = (alterMatch[7]?.trim().toUpperCase() || 'CASCADE') as any;
+    const srcSpec = parseTableSpec(alterMatch[1]);
+    const srcTbl = srcSpec.tableName;
+    const srcTblKey = srcTbl.toLowerCase().replace(/\s+/g, '_');
+    const srcCol = cleanIdent(alterMatch[3].split(',')[0]);
+    const srcColKey = srcCol.toLowerCase().replace(/\s+/g, '_');
 
-    const relId = `rel_${srcTbl}_${tgtTbl}_${Math.random().toString(36).substring(2, 7)}`;
+    const tgtSpec = parseTableSpec(alterMatch[4]);
+    const tgtTbl = tgtSpec.tableName;
+    const tgtTblKey = tgtTbl.toLowerCase().replace(/\s+/g, '_');
+    const tgtCol = cleanIdent(alterMatch[5].split(',')[0]);
+    const tgtColKey = tgtCol.toLowerCase().replace(/\s+/g, '_');
+
+    const constraintName = alterMatch[2] ? cleanIdent(alterMatch[2]) : `fk_${srcTblKey}_${srcColKey}`;
+    const onDel = (alterMatch[6]?.trim().toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+    const onUpd = (alterMatch[7]?.trim().toUpperCase().replace(/\s+/g, ' ') || 'CASCADE') as any;
+
+    const relId = `rel_${srcTblKey}_${tgtTblKey}_${Math.random().toString(36).substring(2, 7)}`;
     relationships.push({
       id: relId,
-      sourceTableId: `tbl_${srcTbl}`,
-      sourceColumnId: `c_${srcTbl}_${srcCol}`,
-      targetTableId: `tbl_${tgtTbl}`,
-      targetColumnId: `c_${tgtTbl}_${tgtCol}`,
+      sourceTableId: `tbl_${srcTblKey}`,
+      sourceColumnId: `c_${srcTblKey}_${srcColKey}`,
+      targetTableId: `tbl_${tgtTblKey}`,
+      targetColumnId: `c_${tgtTblKey}_${tgtColKey}`,
       type: '1:N',
       onDelete: onDel,
       onUpdate: onUpd,
-      name: constraintName
+      name: constraintName,
     });
 
-    const sTable = tables.find((t) => t.id === `tbl_${srcTbl}`);
-    const sCol = sTable?.columns.find((c) => c.name.toLowerCase() === srcCol);
+    const sTable = tables.find((t) => t.id === `tbl_${srcTblKey}`);
+    const sCol = sTable?.columns.find((c) => c.name.toLowerCase() === srcCol.toLowerCase());
     if (sCol) sCol.isFk = true;
   }
 
-  return { tables, relationships };
+  // Parse standalone ALTER TABLE ... ADD [CONSTRAINT] ... PRIMARY KEY statements (common in MySQL/phpMyAdmin dumps)
+  const alterPkRegex =
+    /ALTER\s+TABLE\s+((?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+)(?:\s*\.\s*(?:`[^`]+`|"[^"]+"|[\[][^\]]+[\]]|[^\s\(\);,]+))*)\s+ADD\s+(?:CONSTRAINT\s+([^\s]+)\s+)?PRIMARY\s+KEY(?:\s+CLUSTERED)?\s*\(([^)]+)\)/gi;
+  let apkMatch: RegExpExecArray | null;
+  while ((apkMatch = alterPkRegex.exec(cleanSql)) !== null) {
+    const tblSpec = parseTableSpec(apkMatch[1]);
+    const tblId = `tbl_${tblSpec.tableName.toLowerCase().replace(/\s+/g, '_')}`;
+    const targetTable = tables.find((t) => t.id === tblId);
+    if (targetTable) {
+      const pkColNames = apkMatch[3].split(',').map((c) => cleanIdent(c).toLowerCase());
+      for (const pkCol of pkColNames) {
+        const found = targetTable.columns.find((c) => c.name.toLowerCase() === pkCol);
+        if (found) found.isPk = true;
+      }
+    }
+  }
+
+  // Fallback 1: If no CREATE TABLE found, check for INSERT INTO statements to reconstruct schema
+  let inferredFromInserts = false;
+  if (tables.length === 0) {
+    const insertTableRegex = /INSERT\s+INTO\s+([^\s\(]+(?:\s*\.[^\s\(]+)?)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/gi;
+    let insMatch: RegExpExecArray | null;
+    const inferredTables: Record<string, { colNames: string[]; sampleValues: string[] }> = {};
+
+    while ((insMatch = insertTableRegex.exec(cleanSql)) !== null) {
+      const tblName = parseTableSpec(insMatch[1]).tableName;
+      if (!inferredTables[tblName]) {
+        const colNames = insMatch[2].split(',').map((c) => cleanIdent(c));
+        const sampleValues = insMatch[3].split(',').map((v) => v.trim());
+        inferredTables[tblName] = { colNames, sampleValues };
+      }
+    }
+
+    const inferredKeys = Object.keys(inferredTables);
+    if (inferredKeys.length > 0) {
+      inferredFromInserts = true;
+      let curX = 80;
+      let curY = 80;
+      let colorIdx = 0;
+
+      for (const tblName of inferredKeys) {
+        const { colNames, sampleValues } = inferredTables[tblName];
+        const safeTbl = tblName.toLowerCase().replace(/\s+/g, '_');
+        const tblId = `tbl_${safeTbl}`;
+
+        const cols: Column[] = colNames.map((name, idx) => {
+          const val = sampleValues[idx] || '';
+          let type: ColumnType = 'VARCHAR';
+          if (/^\d+$/.test(val)) type = 'INT';
+          else if (/^\d+\.\d+$/.test(val)) type = 'DECIMAL';
+          else if (/^(?:true|false|1|0)$/i.test(val)) type = 'BOOLEAN';
+          else if (/^'\d{4}-\d{2}-\d{2}'$/.test(val)) type = 'DATE';
+          else if (/^'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'$/.test(val)) type = 'TIMESTAMP';
+
+          const isPk =
+            idx === 0 ||
+            name.toLowerCase() === 'id' ||
+            name.toLowerCase().startsWith('id_') ||
+            name.toLowerCase().endsWith('_id');
+          return {
+            id: `c_${safeTbl}_${name.toLowerCase().replace(/\s+/g, '_')}`,
+            name,
+            type,
+            isPk,
+            isFk: !isPk && (name.toLowerCase().endsWith('_id') || name.toLowerCase().startsWith('id_')),
+            isNullable: !isPk,
+            isUnique: isPk,
+          };
+        });
+
+        tables.push({
+          id: tblId,
+          name: tblName,
+          comment: `Таблица ${tblName} (восстановлена из данных INSERT INTO)`,
+          x: curX,
+          y: curY,
+          color: colors[colorIdx % colors.length],
+          columns: cols,
+        });
+
+        colorIdx++;
+        curX += 340;
+        if (curX > 800) {
+          curX = 80;
+          curY += 340;
+        }
+      }
+    }
+  }
+
+  // Fallback 2: If still no tables found, attempt query-based schema reconstruction (from SELECT queries)
+  if (tables.length === 0) {
+    try {
+      const fallbackInferred = inferSchemaFromQueriesLocally(sql);
+      if (fallbackInferred && fallbackInferred.tables && fallbackInferred.tables.length > 0) {
+        return {
+          tables: fallbackInferred.tables,
+          relationships: fallbackInferred.relationships || [],
+          detectedDialect,
+          databaseName,
+          triggers: triggers.length > 0 ? triggers : undefined,
+          routines: routines.length > 0 ? routines : undefined,
+          queries: queries.length > 0 ? queries : undefined,
+          seedInsertsCount,
+          inferredFromInserts: false,
+        };
+      }
+    } catch {
+      // Ignore fallback error and return standard result
+    }
+  }
+
+  return {
+    tables,
+    relationships,
+    detectedDialect,
+    databaseName,
+    triggers: triggers.length > 0 ? triggers : undefined,
+    routines: routines.length > 0 ? routines : undefined,
+    queries: queries.length > 0 ? queries : undefined,
+    seedInsertsCount,
+    inferredFromInserts,
+  };
 }

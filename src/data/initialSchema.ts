@@ -283,6 +283,126 @@ export const schemaTemplates: { id: string; name: string; description: string; s
         }
       ]
     }
+  },
+  {
+    id: 'car_rental',
+    name: 'Car Rental DB (Деректер қоры)',
+    description: 'Жалға беру жүйесі: Көліктер (Cars), Клиенттер (Clients), Жалға алу (Rentals), триггерлер мен процедуралар',
+    schema: {
+      id: 'schema_car_rental',
+      name: 'car_rental_db',
+      dialect: 'MySQL',
+      version: 1,
+      tables: [
+        {
+          id: 'tbl_cars',
+          name: 'Cars',
+          comment: 'Көліктер кестесі (Cars)',
+          x: 80,
+          y: 80,
+          color: '#3b82f6',
+          columns: [
+            { id: 'c_cars_car_id', name: 'car_id', type: 'SERIAL', isPk: true, isFk: false, isNullable: false, isUnique: true, defaultValue: 'AUTO_INCREMENT' },
+            { id: 'c_cars_brand', name: 'brand', type: 'VARCHAR', lengthOrPrecision: '50', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_cars_model', name: 'model', type: 'VARCHAR', lengthOrPrecision: '50', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_cars_plate', name: 'license_plate', type: 'VARCHAR', lengthOrPrecision: '20', isPk: false, isFk: false, isNullable: false, isUnique: true },
+            { id: 'c_cars_rate', name: 'daily_rate', type: 'DECIMAL', lengthOrPrecision: '10,2', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_cars_avail', name: 'is_available', type: 'BOOLEAN', isPk: false, isFk: false, isNullable: true, isUnique: false, defaultValue: 'TRUE' },
+          ]
+        },
+        {
+          id: 'tbl_clients',
+          name: 'Clients',
+          comment: 'Клиенттер кестесі (Clients)',
+          x: 460,
+          y: 80,
+          color: '#10b981',
+          columns: [
+            { id: 'c_cli_client_id', name: 'client_id', type: 'SERIAL', isPk: true, isFk: false, isNullable: false, isUnique: true, defaultValue: 'AUTO_INCREMENT' },
+            { id: 'c_cli_last', name: 'last_name', type: 'VARCHAR', lengthOrPrecision: '100', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_cli_first', name: 'first_name', type: 'VARCHAR', lengthOrPrecision: '100', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_cli_license', name: 'driver_license', type: 'VARCHAR', lengthOrPrecision: '20', isPk: false, isFk: false, isNullable: false, isUnique: true },
+            { id: 'c_cli_phone', name: 'phone', type: 'VARCHAR', lengthOrPrecision: '20', isPk: false, isFk: false, isNullable: true, isUnique: false },
+            { id: 'c_cli_email', name: 'email', type: 'VARCHAR', lengthOrPrecision: '100', isPk: false, isFk: false, isNullable: true, isUnique: false },
+            { id: 'c_cli_vip', name: 'is_vip', type: 'BOOLEAN', isPk: false, isFk: false, isNullable: true, isUnique: false, defaultValue: 'FALSE' },
+          ]
+        },
+        {
+          id: 'tbl_rentals',
+          name: 'Rentals',
+          comment: 'Жалға алу кестесі (Rentals)',
+          x: 270,
+          y: 400,
+          color: '#8b5cf6',
+          columns: [
+            { id: 'c_ren_rental_id', name: 'rental_id', type: 'SERIAL', isPk: true, isFk: false, isNullable: false, isUnique: true, defaultValue: 'AUTO_INCREMENT' },
+            { id: 'c_ren_car_id', name: 'car_id', type: 'INT', isPk: false, isFk: true, isNullable: false, isUnique: false },
+            { id: 'c_ren_client_id', name: 'client_id', type: 'INT', isPk: false, isFk: true, isNullable: false, isUnique: false },
+            { id: 'c_ren_start_date', name: 'start_date', type: 'DATE', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_ren_end_date', name: 'end_date', type: 'DATE', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_ren_total_days', name: 'total_days', type: 'INT', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_ren_total_cost', name: 'total_cost', type: 'DECIMAL', lengthOrPrecision: '10,2', isPk: false, isFk: false, isNullable: false, isUnique: false },
+            { id: 'c_ren_discount', name: 'discount_applied', type: 'DECIMAL', lengthOrPrecision: '5,2', isPk: false, isFk: false, isNullable: true, isUnique: false, defaultValue: '0.00' },
+          ]
+        }
+      ],
+      relationships: [
+        {
+          id: 'rel_rentals_cars',
+          sourceTableId: 'tbl_rentals',
+          sourceColumnId: 'c_ren_car_id',
+          targetTableId: 'tbl_cars',
+          targetColumnId: 'c_cars_car_id',
+          type: '1:N',
+          onDelete: 'CASCADE',
+          onUpdate: 'CASCADE',
+          name: 'fk_rentals_car'
+        },
+        {
+          id: 'rel_rentals_clients',
+          sourceTableId: 'tbl_rentals',
+          sourceColumnId: 'c_ren_client_id',
+          targetTableId: 'tbl_clients',
+          targetColumnId: 'c_cli_client_id',
+          type: '1:N',
+          onDelete: 'CASCADE',
+          onUpdate: 'CASCADE',
+          name: 'fk_rentals_client'
+        }
+      ],
+      triggers: [
+        {
+          name: 'update_car_status_after_rent',
+          targetTable: 'Rentals',
+          timing: 'AFTER INSERT',
+          definition: 'CREATE TRIGGER update_car_status_after_rent AFTER INSERT ON Rentals FOR EACH ROW BEGIN UPDATE Cars SET is_available = FALSE WHERE car_id = NEW.car_id; END'
+        },
+        {
+          name: 'check_vip_client',
+          targetTable: 'Rentals',
+          timing: 'AFTER INSERT',
+          definition: 'CREATE TRIGGER check_vip_client AFTER INSERT ON Rentals FOR EACH ROW BEGIN DECLARE v_total_spent DECIMAL(10, 2); SELECT SUM(total_cost) INTO v_total_spent FROM Rentals WHERE client_id = NEW.client_id; IF v_total_spent >= 50000.00 THEN UPDATE Clients SET is_vip = TRUE WHERE client_id = NEW.client_id; END IF; END'
+        }
+      ],
+      routines: [
+        {
+          name: 'CreateRental',
+          type: 'PROCEDURE',
+          definition: 'CREATE PROCEDURE CreateRental(IN p_car_id INT, IN p_client_id INT, IN p_start_date DATE, IN p_end_date DATE) ...',
+          description: 'Көліктің бос екенін тексереді, күндерді есептейді және VIP жеңілдік жасайды'
+        }
+      ],
+      queries: [
+        {
+          name: 'Бос емес және бос көліктер тізімі',
+          sql: "SELECT car_id, CONCAT(brand, ' ', model) AS Көлік, license_plate AS Мем_номер, daily_rate AS Тәуліктік_баға, IF(is_available, 'Бос', 'Жалға берілген') AS Мәртебесі FROM Cars;"
+        },
+        {
+          name: 'Барлық жалға алу тарихы мен есептелген сомалар',
+          sql: "SELECT r.rental_id, CONCAT(c.last_name, ' ', c.first_name) AS Клиент, CONCAT(car.brand, ' ', car.model) AS Көлік, r.start_date AS Басталды, r.end_date AS Аяқталды, r.total_days AS Күн_саны, CONCAT(r.discount_applied, '%') AS Жеңілдік, r.total_cost AS Жалпы_сома FROM Rentals r JOIN Clients c ON r.client_id = c.client_id JOIN Cars car ON r.car_id = car.car_id;"
+        }
+      ]
+    }
   }
 ];
 

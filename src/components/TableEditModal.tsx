@@ -44,21 +44,21 @@ export const TableEditModal: React.FC<TableEditModalProps> = ({
   onClose,
   onSave,
 }) => {
-  if (!isOpen || !table) return null;
-
-  const [name, setName] = useState(table.name || '');
-  const [comment, setComment] = useState(table.comment || '');
-  const [color, setColor] = useState(table.color || '#3b82f6');
-  const [columns, setColumns] = useState<Column[]>([...(table.columns || [])]);
+  const [name, setName] = useState(table?.name || '');
+  const [comment, setComment] = useState(table?.comment || '');
+  const [color, setColor] = useState(table?.color || '#3b82f6');
+  const [columns, setColumns] = useState<Column[]>(table?.columns ? [...table.columns] : []);
 
   React.useEffect(() => {
-    if (table) {
+    if (table && isOpen) {
       setName(table.name || '');
       setComment(table.comment || '');
       setColor(table.color || '#3b82f6');
       setColumns([...(table.columns || [])]);
     }
-  }, [table]);
+  }, [table, isOpen]);
+
+  if (!isOpen || !table) return null;
 
   const handleAddColumn = () => {
     const newCol: Column = {

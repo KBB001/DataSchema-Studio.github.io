@@ -28,7 +28,8 @@ import {
   Check,
   RotateCcw,
   CheckCircle2,
-  Network
+  Network,
+  Database
 } from 'lucide-react';
 import { CanvasSettings, DiagramShape, Relationship, Schema, Table, ThemePreset } from '../types';
 import { TableCard } from './TableCard';
@@ -1282,6 +1283,27 @@ export const DiagramCanvas: React.FC<DiagramCanvasProps> = ({
                     ))}
                 </div>
               </div>
+            )}
+          </div>
+
+          <div className="w-px h-5 bg-slate-300 mx-0.5" />
+
+          {/* Database info badge */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+            <Database className="w-3.5 h-3.5 text-blue-600" />
+            <span className="font-bold text-slate-800 font-mono">{schema.name}</span>
+            <span className="px-1.5 py-0.2 bg-blue-100 text-blue-800 text-[10px] font-bold rounded">
+              {schema.dialect}
+            </span>
+            {schema.triggers && schema.triggers.length > 0 && (
+              <span className="px-1.5 py-0.2 bg-amber-100 text-amber-800 text-[10px] font-semibold rounded" title={`${schema.triggers.length} триггеров`}>
+                ⚡ {schema.triggers.length} триггера
+              </span>
+            )}
+            {schema.routines && schema.routines.length > 0 && (
+              <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-800 text-[10px] font-semibold rounded" title={`${schema.routines.length} процедур`}>
+                ⚙️ {schema.routines.length} проц.
+              </span>
             )}
           </div>
 
